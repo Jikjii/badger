@@ -254,8 +254,9 @@ func (p *Badger) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		}
 	}
 
+	scheme := p.getScheme(req)
 	cleanedQuery := queryValues.Encode()
-	originalRequestURL := fmt.Sprintf("%s://%s%s", p.getScheme(req), req.Host, req.URL.Path)
+	originalRequestURL := fmt.Sprintf("%s://%s%s", scheme, req.Host, req.URL.Path)
 	if cleanedQuery != "" {
 		originalRequestURL = fmt.Sprintf("%s?%s", originalRequestURL, cleanedQuery)
 	}
@@ -279,11 +280,11 @@ func (p *Badger) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	cookieData := VerifyBody{
 		Sessions:           cookies,
 		OriginalRequestURL: originalRequestURL,
-		RequestScheme:      &req.URL.Scheme,
+		RequestScheme:      &scheme,
 		RequestHost:        &req.Host,
 		RequestPath:        &req.URL.Path,
 		RequestMethod:      &req.Method,
-		TLS:                req.TLS != nil,
+		TLS:                scheme == "https",
 		RequestIP:          &realIP,
 		Headers:            headers,
 		Query:              queryParams,
@@ -430,13 +431,11 @@ func (p *Badger) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 
 func (p *Badger) extractCookies(req *http.Request) map[string]string {
 	cookies := make(map[string]string)
-	isSecureRequest := req.TLS != nil
 
+	// req.Cookies() only carries name=value pairs, so there is no Secure flag
+	// to check here; filtering on req.TLS would drop sessions behind TLS offload.
 	for _, cookie := range req.Cookies() {
 		if strings.HasPrefix(cookie.Name, p.userSessionCookieName) {
-			if cookie.Secure && !isSecureRequest {
-				continue
-			}
 			cookies[cookie.Name] = cookie.Value
 		}
 	}
@@ -444,8 +443,15 @@ func (p *Badger) extractCookies(req *http.Request) map[string]string {
 	return cookies
 }
 
+// getScheme returns the scheme the client used. TLS that Traefik terminated
+// itself wins; otherwise the scheme reported by a trusted proxy is used
+// (setIPHeaders copies CF-Visitor into X-Forwarded-Proto). Untrusted peers
+// can never change the scheme.
 func (p *Badger) getScheme(req *http.Request) string {
 	if req.TLS != nil {
+		return "https"
+	}
+	if p.isTrustedIP(req.RemoteAddr) && strings.EqualFold(req.Header.Get(xForwardProto), "https") {
 		return "https"
 	}
 	return "http"
